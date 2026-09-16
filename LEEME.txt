@@ -1,0 +1,38 @@
+TRUEQUEA PE — REVISIÓN DEL PROYECTO ORIGINAL
+
+Esta entrega conserva la interfaz y los módulos del ZIP original. No es la
+versión nueva ni requiere cambiar a tablas tq_. Lee REVISION.md para ver
+qué se corrigió y qué sigue pendiente.
+
+INSTALACIÓN
+1. Conserva el ZIP anterior y exporta tus datos desde el navegador donde
+   todavía aparecen: Administrador > Copia JSON. No borres localStorage.
+2. Descomprime este ZIP en una carpeta nueva.
+3. Para probar en Windows, abre CMD en esa carpeta y ejecuta:
+   py -m http.server 8000 --bind 127.0.0.1
+   Abre http://127.0.0.1:8000/index.html y mantén CMD abierto.
+   Hace falta Python instalado. Para otros dispositivos usa un hosting HTTPS.
+4. Si ya tienes hosting, sustituye los archivos de aplicación modificados,
+   incluyendo js/vendor. Una subida de archivos nuevos NO elimina archivos
+   viejos: retira los tres archivos antiguos indicados en REVISION.md.
+   Conserva fuera del directorio público los respaldos y JSON de datos.
+5. No vuelvas a ejecutar supabase_setup.sql: se conserva como referencia
+   histórica del esquema, pero sus políticas públicas NO protegen cuentas
+   ni conversaciones. Esta revisión no cambia datos ni permisos remotos.
+6. Abre Administrador > Estado de la nube / Diagnóstico. Ahora distingue
+   lectura, escritura confirmada y suscripción Realtime, y muestra errores.
+7. Comprueba un artículo sin foto y un mensaje entre dos cuentas en dos
+   navegadores. Recarga y verifica que persisten. Después prueba una foto.
+
+CONFIGURACIÓN
+La URL y clave pública existentes siguen en js/14-supabase.js.
+Supabase es el remoto elegido mientras activa:true. El puente PHP no debe
+arrancar simultáneamente. localStorage es solo una copia limitada: puede
+llenarse. La música subida al reproductor sigue en IndexedDB del dispositivo.
+
+LIMITACIONES IMPORTANTES
+La autenticación y roles actuales son locales; NO se usa Supabase Auth.
+Fotos y chats continúan en una sola fila JSON compartida. Esta limpieza no
+convierte el sistema en una aplicación privada por usuario ni corrige las
+sobrescrituras simultáneas entre dispositivos. Falta esa reparación estructural.
+No se ha eliminado ninguna base de datos en un proveedor remoto.
