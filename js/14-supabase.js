@@ -26,7 +26,7 @@ const SUPABASE_CONFIG = {
 };
 
 // SDK de Supabase (cargado dinámicamente)
-const SUPABASE_SDK = 'js/vendor/supabase-2.57.4.js';
+const SUPABASE_SDK = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js';
 
 const NUBE = {
   activa: false, modo: 'local', client: null, timer: null,
