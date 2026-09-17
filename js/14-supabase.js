@@ -8,24 +8,17 @@
    ---------------------------------------------------------------------
    Con esto todos los usuarios comparten la MISMA información desde
    cualquier celular o computadora.
-
-   Supabase es el servicio remoto configurado. El navegador mantiene una
-   copia local, que puede fallar si no hay espacio. No hay cambio automático
-   a otro servidor al fallar Supabase. La conexión no garantiza escritura.
-
-   Tu sesión (con qué cuenta entraste) NUNCA se sube: queda en tu equipo.
-   Para apagar la nube: pon activa:false aquí abajo.
    ===================================================================== */
 
 const SUPABASE_CONFIG = {
   activa: true,
   tabla: 'truequea_data',  // nombre de la tabla en Supabase
-  segundosRevision: 15,     // cada cuánto revisa la nube
+  segundosRevision: 5,      // cada cuánto revisa la nube (respaldo del realtime)
   supabaseUrl: 'https://zrnhlrefjzunyfdnphhj.supabase.co',
   supabaseKey: 'sb_publishable_iE2sosBWooKdoNUaOUFo7Q_ziUrEHIk',
 };
 
-// SDK de Supabase (cargado dinámicamente)
+// SDK de Supabase (cargado dinámicamente) — preferimos CDN
 const SUPABASE_SDK = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js';
 
 const NUBE = {
@@ -55,18 +48,34 @@ function sanear(datos) {
   return datos;
 }
 
-/* Carga el SDK de Supabase */
+/* Carga el SDK de Supabase (intenta local, si falla cae al CDN) */
 function cargarSupabaseSDK() {
+  const CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/dist/umd/supabase.min.js';
   return new Promise((resolve) => {
-    if (window.supabase) {
-      resolve(true);
-      return;
+    try {
+      if (window.supabase) { resolve(true); return; }
+
+      const tryLoad = (src) => new Promise((res) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = true;
+        script.onload = () => res(true);
+        script.onerror = () => res(false);
+        document.head.appendChild(script);
+      });
+
+      // Primero intento la ruta que tengas en SUPABASE_SDK
+      tryLoad(SUPABASE_SDK).then(ok => {
+        if (ok && window.supabase) return resolve(true);
+        // si falla, intento CDN
+        tryLoad(CDN).then(ok2 => {
+          resolve(ok2 && !!window.supabase);
+        });
+      });
+    } catch (e) {
+      console.warn('cargarSupabaseSDK error:', e);
+      resolve(false);
     }
-    const script = document.createElement('script');
-    script.src = SUPABASE_SDK;
-    script.onload = () => resolve(true);
-    script.onerror = () => resolve(false);
-    document.head.appendChild(script);
   });
 }
 
@@ -99,11 +108,19 @@ async function iniciarNube() {
     /* Probar conexión leyendo la tabla */
     const { data, error } = await NUBE.client
       .from(SUPABASE_CONFIG.tabla)
-      .select('data')
+      .select('data, actualizado')
       .eq('id', 1)
       .maybeSingle();
 
     if (error) throw error;
+
+    if (data && data.data) {
+      aplicarDesdeNube(data.data);   // fusiona y repinta
+    } else {
+      /* Primera vez: subir nuestros datos */
+      NUBE.leido = true;
+      subirANube(true);
+    }
 
     NUBE.ultimaLectura = new Date();
     NUBE.activa = true;
@@ -112,29 +129,24 @@ async function iniciarNube() {
     NUBE.detalle = 'Conectada con Supabase.';
     SERVIDOR.activo = false;
 
-    /* Si hay datos, aplicarlos */
-    if (data && data.data) {
-      aplicarDesdeNube(data.data);
-    } else {
-      /* Primera vez: subir nuestros datos */
-      NUBE.leido = true;
-      subirANube(true);
-    }
-
+    /* Quitar canal previo si existe */
     if (NUBE.canal) {
-      await NUBE.client.removeChannel(NUBE.canal);
+      try { await NUBE.client.removeChannel(NUBE.canal); } catch(e){/*ignore*/ }
       NUBE.canal = null;
     }
-    iniciarPolling();
 
     /* Configurar suscripción a cambios en tiempo real */
     try {
+      // usar nombre de canal con prefijo público (v2)
       NUBE.canal = NUBE.client
-        .channel(`truequea_changes`)
+        .channel('public:truequea_changes')
         .on('postgres_changes', { event: '*', schema: 'public', table: SUPABASE_CONFIG.tabla }, (payload) => {
-          if (payload.new && payload.new.data) {
-            aplicarDesdeNube(payload.new.data);
-          }
+          try {
+            if (payload && payload.new && payload.new.data) {
+              console.log('Realtime payload', payload);
+              aplicarDesdeNube(payload.new.data);
+            }
+          } catch (e) { console.warn('error al aplicar payload', e); }
         })
         .subscribe((status) => {
           NUBE.conectado = status === 'SUBSCRIBED';
@@ -146,6 +158,7 @@ async function iniciarNube() {
       iniciarPolling();
     }
 
+    iniciarPolling(); // respaldo
     marcarModo();
   } catch (e) {
     NUBE.activa = false;
@@ -158,7 +171,7 @@ async function iniciarNube() {
 /* Polling como respaldo si realtime falla */
 function iniciarPolling() {
   clearInterval(NUBE.reloj);
-  NUBE.reloj = setInterval(bajarDatos, Math.max(8, SUPABASE_CONFIG.segundosRevision) * 1000);
+  NUBE.reloj = setInterval(bajarDatos, Math.max(4, SUPABASE_CONFIG.segundosRevision) * 1000);
 }
 
 async function bajarDatos() {
@@ -184,53 +197,35 @@ async function bajarDatos() {
 /* =====================================================================
    BAJAR Y SUBIR
    ===================================================================== */
-function aplicarDesdeNube(datos) {
-  const vacia = !datos || !Array.isArray(datos.usuarios) || !datos.usuarios.length;
 
-  if (vacia) {
-    /* La nube está vacía de verdad: la estrenamos con lo nuestro */
+/* aplicarDesdeNube: fusiona con fusionar() (js/02-sync.js) y repinta.
+   ANTES este archivo tenía su propio "mergeById" que solo mezclaba
+   usuarios/articulos/anuncios. Por eso los chats y mensajes de otra
+   persona nunca se aplicaban al llegar de la nube: se leían del
+   payload pero se descartaban aquí mismo. fusionar() sí mezcla TODAS
+   las colecciones (incluye chats, mensajes, notis, intercambios...)
+   registro por registro, respetando fechas de modificación (mod) y
+   lápidas de borrado. Usarla es lo que arregla la mensajería. */
+function aplicarDesdeNube(datosNube) {
+  try {
+    if (!datosNube) return;
+    datosNube = sanear(datosNube);
+
+    const sesion = BD.sesion, sesionVence = BD.sesionVence;
+    const huboCambios = fusionar(datosNube);
+    BD.sesion = sesion;
+    BD.sesionVence = sesionVence;
+
     NUBE.leido = true;
-    subirANube(true);
+    NUBE.ultima = new Date();
+    guardarSoloLocal(); // mantén copia local
+    if (huboCambios) refrescarTodo(); // repinta solo si de verdad cambió algo
     marcarModo();
-    return;
+  } catch (e) {
+    console.error('Error aplicando datos de la nube:', e);
+    NUBE.error = e.message || String(e);
+    marcarModo();
   }
-
-  const h = huellaBD(datos);
-  const primeraVez = !NUBE.leido;
-  NUBE.leido = true;
-  if (!primeraVez && h === NUBE.huella) { NUBE.ultima = new Date(); marcarModo(); return; }
-  NUBE.huella = h;
-
-  NUBE.aplicando = true;
-  const antes = { u: BD.usuarios.length, a: BD.articulos.length };
-
-  /* FUSIÓN: lo mío + lo de la nube, gana el más reciente de cada registro */
-  const hubo = fusionar(sanear(datos));
-  sanear(BD);
-  // Los datos descargados no son ediciones nuevas de este navegador.
-  COLECCIONES.forEach(k => {
-    SOMBRA[k] = Object.fromEntries(BD[k].map(r => [r.id, sinMod(r)]));
-  });
-  SOMBRA_CONFIG = JSON.stringify({ ...BD.config, mod: 0 });
-  guardarSoloLocal();
-
-  const despues = { u: BD.usuarios.length, a: BD.articulos.length };
-  NUBE.ultimoConteo = despues;
-  if (primeraVez) guardarCopia('al conectar con la nube');
-
-  if (hubo) refrescarTodo();
-  setTimeout(() => {
-    NUBE.aplicando = false;
-    if (NUBE.pendiente) programarNube();
-  }, 700);
-
-  /* si yo tenía cosas que la nube no tiene, las subo */
-  if (despues.u > (datos.usuarios || []).length ||
-      despues.a > (datos.articulos || []).length || NUBE.pendiente) {
-    programarNube();
-  }
-  NUBE.ultima = new Date();
-  marcarModo();
 }
 
 function refrescarTodo() {
@@ -330,6 +325,7 @@ marcarModo = function () {
     s.style.cssText = 'display:block;margin-top:6px;font-size:12px';
     pie.appendChild(s);
   }
+
   const escritura = NUBE.ultimaEscritura ? NUBE.ultimaEscritura.toLocaleTimeString() : 'sin confirmar';
   if (NUBE.error) {
     s.textContent = '⚠️ Supabase: ' + NUBE.error + ' · Última escritura: ' + escritura;
@@ -385,6 +381,21 @@ async function verDiagnostico() {
     ${NUBE.error ? `<div class="diag-arreglo"><b>Error detectado:</b><p>${esc(NUBE.error)}</p></div>` : ''}
   `;
   if (typeof abrir === 'function') abrir('mDiag');
+}
+
+/* Parche de debug: forzar lectura y aplicacion desde la nube (útil para probar) */
+async function forzarAplicacionNube() {
+  try {
+    if (!NUBE.client) { console.warn('NUBE.client no disponible'); return; }
+    const resp = await NUBE.client.from(SUPABASE_CONFIG.tabla).select('data').eq('id',1).maybeSingle();
+    console.log('forzado read', resp);
+    if (resp && resp.data && resp.data.data) {
+      aplicarDesdeNube(resp.data.data);
+      console.log('aplicado forzado');
+    } else {
+      console.warn('no hay data en id=1');
+    }
+  } catch(e) { console.error(e); }
 }
 
 document.addEventListener('DOMContentLoaded', () => setTimeout(iniciarNube, 400));
